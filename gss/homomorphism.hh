@@ -47,9 +47,31 @@ namespace gss
         /// supplies an incumbent score.
         std::optional<double> initial_upper_bound;
 
+        /// Optional semantic feasibility test for a pattern-to-target vertex assignment. Returning
+        /// false rejects the assignment before any objective cost is accumulated.
+        std::function<bool(unsigned, unsigned)> vertex_allowed;
+
+        /// Optional semantic feasibility test for a newly closed pair of assignments. The self-pair
+        /// (p, p, t, t) is evaluated once, and each unordered pair of distinct pattern vertices is
+        /// evaluated once when the second endpoint becomes fixed. Returning false rejects the
+        /// assignment.
+        std::function<bool(unsigned, unsigned, unsigned, unsigned)> pair_allowed;
+
         /// If set, retain Glasgow's variable ordering but order candidate target values by their
         /// immediate incremental objective cost. Existing value ordering is used to break ties.
         bool order_values_by_cost = false;
+
+        /// Optional bound on successful mapping extensions before the first improving complete
+        /// mapping is found. The counter is not reset when an incumbent is found.
+        std::optional<unsigned long long> first_solution_call_limit;
+
+        /// Optional bound on successful mapping extensions after the first improving complete
+        /// mapping is found. The counter is cumulative from the start of the search.
+        std::optional<unsigned long long> after_solution_call_limit;
+
+        /// Maximum number of improving complete mappings accepted by the objective search. Zero
+        /// means unlimited. An unset value leaves the solver unbounded.
+        std::optional<unsigned long long> max_solution_trials;
     };
 
     struct HomomorphismParams

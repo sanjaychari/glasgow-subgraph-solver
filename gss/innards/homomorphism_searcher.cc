@@ -49,6 +49,38 @@ auto HomomorphismSearcher::initial_objective_state() const -> HomomorphismObject
     return result;
 }
 
+
+auto HomomorphismSearcher::objective_assignment_allowed(
+    const HomomorphismAssignment & assignment,
+    const HomomorphismObjectiveState & state) const -> bool
+{
+    if (! params.objective)
+        return true;
+
+    const auto & objective = *params.objective;
+    if (objective.vertex_allowed
+        && ! objective.vertex_allowed(assignment.pattern_vertex, assignment.target_vertex))
+        return false;
+
+    if (objective.pair_allowed) {
+        if (! objective.pair_allowed(
+                assignment.pattern_vertex, assignment.pattern_vertex, assignment.target_vertex,
+                assignment.target_vertex))
+            return false;
+
+        for (unsigned other_pattern = 0; other_pattern < state.mapping.size(); ++other_pattern) {
+            const int other_target = state.mapping[other_pattern];
+            if (other_target >= 0
+                && ! objective.pair_allowed(
+                    assignment.pattern_vertex, other_pattern, assignment.target_vertex,
+                    unsigned(other_target)))
+                return false;
+        }
+    }
+
+    return true;
+}
+
 auto HomomorphismSearcher::objective_incremental_cost(
     const HomomorphismAssignment & assignment,
     const HomomorphismObjectiveState & state) const -> double
@@ -92,6 +124,9 @@ auto HomomorphismSearcher::apply_objective_assignment(
     if (state.mapping[assignment.pattern_vertex] >= 0)
         return state.mapping[assignment.pattern_vertex] == int(assignment.target_vertex);
 
+    if (! objective_assignment_allowed(assignment, state))
+        return false;
+
     state.score += objective_incremental_cost(assignment, state);
     state.mapping[assignment.pattern_vertex] = int(assignment.target_vertex);
 
@@ -111,10 +146,40 @@ auto HomomorphismSearcher::objective_sort(
         return;
 
     stable_sort(branch_v.begin(), branch_v.begin() + branch_v_end, [&](int a, int b) {
-        return objective_incremental_cost(
-                   {pattern_vertex, unsigned(a)}, state)
-            < objective_incremental_cost({pattern_vertex, unsigned(b)}, state);
+        const HomomorphismAssignment aa{pattern_vertex, unsigned(a)};
+        const HomomorphismAssignment bb{pattern_vertex, unsigned(b)};
+        const bool a_allowed = objective_assignment_allowed(aa, state);
+        const bool b_allowed = objective_assignment_allowed(bb, state);
+        if (a_allowed != b_allowed)
+            return a_allowed;
+        if (! a_allowed)
+            return false;
+        return objective_incremental_cost(aa, state) < objective_incremental_cost(bb, state);
     });
+}
+
+auto HomomorphismSearcher::objective_call_limit_reached_after_extension() -> bool
+{
+    if (! params.objective)
+        return false;
+
+    ++_objective_search_calls;
+    const auto & objective = *params.objective;
+    const auto & active_limit = _have_best_objective_mapping
+        ? objective.after_solution_call_limit
+        : objective.first_solution_call_limit;
+
+    // Match Qiskit's VF2 call-limit check: the extension that makes the counter equal to the
+    // configured limit is not entered. The counter is cumulative across the first incumbent.
+    return active_limit && _objective_search_calls >= *active_limit;
+}
+
+auto HomomorphismSearcher::objective_trial_limit_reached() const -> bool
+{
+    if (! params.objective || ! params.objective->max_solution_trials)
+        return false;
+    const auto limit = *params.objective->max_solution_trials;
+    return limit != 0 && _objective_solution_trials >= limit;
 }
 
 auto HomomorphismSearcher::assignments_as_proof_decisions(const HomomorphismAssignments & assignments) const -> vector<pair<int, int>>
@@ -203,11 +268,18 @@ auto HomomorphismSearcher::restarting_search(
             proof->post_solution(solution_in_proof_form(assignments));
 
         if (params.objective) {
+            // Qiskit's max_trials predicate is evaluated on each yielded improving layout. Once
+            // the configured number has already been accepted, the next improving layout stops
+            // the search and is not itself accepted.
+            if (objective_trial_limit_reached())
+                return SearchResult::Aborted;
+
             if (! _best_objective_value || objective_state.score < *_best_objective_value) {
                 _best_objective_value = objective_state.score;
                 _best_objective_mapping.clear();
                 expand_to_full_result(assignments, _best_objective_mapping);
                 _have_best_objective_mapping = true;
+                ++_objective_solution_trials;
             }
             return SearchResult::SatisfiableButKeepGoing;
         }
@@ -305,6 +377,13 @@ auto HomomorphismSearcher::restarting_search(
 
         if (proof)
             proof->start_level(depth + 2);
+
+        // Qiskit's VF2 call_limit counts successful extensions of the partial mapping. Glasgow's
+        // closest equivalent is a branch assignment that survives propagation.
+        if (objective_call_limit_reached_after_extension()) {
+            assignments.values.resize(assignments_size);
+            return SearchResult::Aborted;
+        }
 
         // recursive search
         auto search_result = restarting_search(assignments, new_domains, new_objective_state, nodes, propagations,

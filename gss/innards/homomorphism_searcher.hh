@@ -104,6 +104,12 @@ namespace gss::innards
         std::optional<double> _best_objective_value;
         VertexToVertexMapping _best_objective_mapping;
         bool _have_best_objective_mapping = false;
+        unsigned long long _objective_search_calls = 0;
+        unsigned long long _objective_solution_trials = 0;
+
+        auto objective_assignment_allowed(
+            const HomomorphismAssignment &,
+            const HomomorphismObjectiveState &) const -> bool;
 
         auto objective_incremental_cost(
             const HomomorphismAssignment &,
@@ -118,6 +124,10 @@ namespace gss::innards
             unsigned,
             unsigned,
             const HomomorphismObjectiveState &) const -> void;
+
+        auto objective_call_limit_reached_after_extension() -> bool;
+
+        auto objective_trial_limit_reached() const -> bool;
 
         auto assignments_as_proof_decisions(const HomomorphismAssignments & assignments) const -> std::vector<std::pair<int, int>>;
 

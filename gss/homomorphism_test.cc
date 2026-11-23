@@ -369,6 +369,85 @@ TEST_CASE("minimum-cost homomorphism objective")
         CHECK(result.complete);
     }
 
+    SECTION("rejects semantically invalid assignments")
+    {
+        auto pattern = read_csv(stringstream{"a,b\n"}, "pattern");
+        auto target = read_csv(stringstream{"1,2\n3,4\n"}, "target");
+
+        auto t = [&](const string & s) { return unsigned(*target.vertex_from_name(s)); };
+
+        HomomorphismParams params;
+        params.timeout = make_shared<Timeout>(0s);
+        params.restarts_schedule = make_unique<NoRestartsSchedule>();
+
+        HomomorphismObjective objective;
+        objective.vertex_allowed = [&](unsigned, unsigned tv) {
+            return tv != t("1") && tv != t("2");
+        };
+        objective.pair_cost = [&](unsigned p, unsigned q, unsigned, unsigned) {
+            return p == q ? 0.0 : 1.0;
+        };
+        params.objective = objective;
+
+        auto result = solve_homomorphism_problem(pattern, target, params);
+        REQUIRE(result.objective_value);
+        set<int> mapped_targets;
+        for (auto & [_, target_vertex] : result.mapping)
+            mapped_targets.insert(target_vertex);
+        CHECK(mapped_targets == set<int>{int(t("3")), int(t("4"))});
+    }
+
+    SECTION("respects objective call limits before the first solution")
+    {
+        auto pattern = read_csv(stringstream{"a,b\n"}, "pattern");
+        auto target = read_csv(stringstream{"1,2\n3,4\n"}, "target");
+
+        HomomorphismParams params;
+        params.timeout = make_shared<Timeout>(0s);
+        params.restarts_schedule = make_unique<NoRestartsSchedule>();
+
+        HomomorphismObjective objective;
+        objective.first_solution_call_limit = 1;
+        objective.after_solution_call_limit = 1;
+        objective.pair_cost = [](unsigned p, unsigned q, unsigned, unsigned) {
+            return p == q ? 0.0 : 1.0;
+        };
+        params.objective = objective;
+
+        auto result = solve_homomorphism_problem(pattern, target, params);
+        CHECK(result.mapping.empty());
+        CHECK_FALSE(result.complete);
+    }
+
+    SECTION("limits the number of accepted improving complete mappings")
+    {
+        auto pattern = read_csv(stringstream{"a,b\n"}, "pattern");
+        auto target = read_csv(stringstream{"1,2\n3,4\n"}, "target");
+
+        auto t = [&](const string & s) { return unsigned(*target.vertex_from_name(s)); };
+
+        HomomorphismParams params;
+        params.timeout = make_shared<Timeout>(0s);
+        params.restarts_schedule = make_unique<NoRestartsSchedule>();
+
+        params.value_ordering_heuristic = ValueOrdering::None;
+        HomomorphismObjective objective;
+        objective.max_solution_trials = 1;
+        objective.pair_cost = [&](unsigned p, unsigned q, unsigned x, unsigned y) {
+            if (p == q)
+                return 0.0;
+            const bool first_edge =
+                (x == t("1") && y == t("2")) || (x == t("2") && y == t("1"));
+            return first_edge ? 10.0 : 1.0;
+        };
+        params.objective = objective;
+
+        auto result = solve_homomorphism_problem(pattern, target, params);
+        REQUIRE(result.objective_value);
+        CHECK(result.mapping.size() == 2);
+        CHECK_FALSE(result.complete);
+    }
+
     SECTION("includes vertex costs")
     {
         auto pattern = read_csv(stringstream{"a,\nb,\n"}, "pattern");
