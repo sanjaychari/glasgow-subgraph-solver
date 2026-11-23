@@ -145,10 +145,11 @@ namespace
                 RestartsSchedule * round_schedule = active_schedule;
 
                 ++result.propagations;
-                if (searcher.propagate(true, domains, assignments)) {
+                auto objective_state = searcher.initial_objective_state();
+                if (searcher.propagate(true, domains, assignments, objective_state)) {
                     auto assignments_copy = assignments;
 
-                    switch (searcher.restarting_search(assignments_copy, domains, result.nodes, result.propagations,
+                    switch (searcher.restarting_search(assignments_copy, domains, objective_state, result.nodes, result.propagations,
                         result.solution_count, 0, *round_schedule)) {
                     case SearchResult::Satisfiable:
                         searcher.save_result(assignments_copy, result);
@@ -199,6 +200,10 @@ namespace
 
                 round_schedule->did_a_restart();
             }
+
+            // Minimum-cost search keeps its incumbent inside the searcher so it survives
+            // backtracking and restarts. Copy the best mapping out even after a timeout.
+            searcher.save_best_objective_result(result);
 
             if (params.restarts_schedule->might_restart())
                 result.extra_stats.emplace_back("restarts = " + to_string(number_of_restarts));
@@ -354,10 +359,11 @@ namespace
                     }
 
                     ++thread_result.propagations;
-                    if (searchers[t]->propagate(true, domains, thread_assignments)) {
+                    auto objective_state = searchers[t]->initial_objective_state();
+                    if (searchers[t]->propagate(true, domains, thread_assignments, objective_state)) {
                         auto assignments_copy = thread_assignments;
 
-                        switch (searchers[t]->restarting_search(assignments_copy, domains, thread_result.nodes, thread_result.propagations,
+                        switch (searchers[t]->restarting_search(assignments_copy, domains, objective_state, thread_result.nodes, thread_result.propagations,
                             thread_result.solution_count, 0, *thread_restarts_schedule)) {
                         case SearchResult::Satisfiable:
                             searchers[t]->save_result(assignments_copy, thread_result);
@@ -530,7 +536,7 @@ namespace
             // Not for induced: mapping every pattern vertex onto one self-looped target vertex
             // sends each pattern non-edge to that loop -- an edge -- which an induced mapping
             // forbids.
-            if (! ((params.injectivity == Injectivity::NonInjective) && ! params.induced && ! pattern.has_vertex_labels() && ! pattern.has_edge_labels() && target.loopy() && ! params.count_solutions && ! params.enumerate_callback))
+            if (! ((params.injectivity == Injectivity::NonInjective) && ! params.induced && ! pattern.has_vertex_labels() && ! pattern.has_edge_labels() && target.loopy() && ! params.count_solutions && ! params.enumerate_callback && ! params.objective))
                 return StepOutcome::Continue;
 
             HomomorphismResult result;
@@ -584,7 +590,7 @@ namespace
             // can_use_clique() carries the injectivity premise the reduction needs (#94),
             // rather than leaving it to the fact that TargetLoopShortcutStep usually gets
             // there first.
-            if (! (can_use_clique(params, target.loopy()) && is_simple_clique(pattern) && ! target.directed() && ! (params.induced && target.loopy())))
+            if (! (can_use_clique(params, target.loopy()) && is_simple_clique(pattern) && ! target.directed() && ! (params.induced && target.loopy()) && ! params.objective))
                 return StepOutcome::Continue;
 
             CliqueParams clique_params;
@@ -693,6 +699,17 @@ auto gss::solve_homomorphism_problem(
     const InputGraph & target,
     const HomomorphismParams & params) -> HomomorphismResult
 {
+    if (params.objective) {
+        if (params.objective->initial_upper_bound && ! (*params.objective->initial_upper_bound >= 0.0))
+            throw UnsupportedConfiguration{"Minimum-cost homomorphism upper bound must be non-negative and not NaN"};
+        if (1 != params.n_threads)
+            throw UnsupportedConfiguration{"Minimum-cost homomorphism search currently requires sequential search, use --threads 1"};
+        if (params.proof_options)
+            throw UnsupportedConfiguration{"Minimum-cost homomorphism search cannot yet be used with proof logging"};
+        if (params.count_solutions || params.enumerate_callback)
+            throw UnsupportedConfiguration{"Minimum-cost homomorphism search cannot be combined with solution counting or enumeration"};
+    }
+
     // Staged solving uses an internal bounded search round (a restart) as its budget, so it
     // only makes sense for the sequential engine; threaded staging is a later refinement.
     if (params.staged && 1 != params.n_threads)

@@ -25,6 +25,33 @@ namespace gss
         NonInjective
     };
 
+    /// Optional additive objective for finding a minimum-cost homomorphism.
+    ///
+    /// Costs must be non-negative. This monotonicity requirement allows the search to prune a
+    /// partial mapping as soon as its accumulated cost is not strictly better than the current
+    /// upper bound, matching the decreasing-score branch-and-bound used by Qiskit's VF2 search.
+    /// The callbacks use the solver's internal integer vertex identifiers.
+    struct HomomorphismObjective
+    {
+        /// Cost of assigning a pattern vertex to a target vertex. An unset callback means zero.
+        std::function<double(unsigned, unsigned)> vertex_cost;
+
+        /// Cost contributed by a newly fixed assignment (p -> t) and another assignment (q -> u).
+        /// The self-pair (p, p, t, t) is evaluated once when p becomes fixed, and each unordered
+        /// pair of distinct pattern vertices is evaluated exactly once when the second endpoint
+        /// becomes fixed. An unset callback means zero.
+        std::function<double(unsigned, unsigned, unsigned, unsigned)> pair_cost;
+
+        /// Optional strict initial upper bound. A solution is returned only if its cost is lower
+        /// than this value. This is useful for post-layout optimisation, where the existing layout
+        /// supplies an incumbent score.
+        std::optional<double> initial_upper_bound;
+
+        /// If set, retain Glasgow's variable ordering but order candidate target values by their
+        /// immediate incremental objective cost. Existing value ordering is used to break ties.
+        bool order_values_by_cost = false;
+    };
+
     struct HomomorphismParams
     {
         /// Timeout handler
@@ -44,6 +71,10 @@ namespace gss
 
         /// Print solutions, for enumerating
         std::function<auto(const VertexToVertexMapping &)->bool> enumerate_callback;
+
+        /// Optional minimum-cost objective. When present, search continues after each structural
+        /// solution, tightens an incumbent upper bound, and returns the best mapping found.
+        std::optional<HomomorphismObjective> objective;
 
         /// Which value-ordering heuristic?
         ValueOrdering value_ordering_heuristic = ValueOrdering::Biased;
@@ -134,6 +165,10 @@ namespace gss
     {
         /// The mapping, empty if none found.
         VertexToVertexMapping mapping;
+
+        /// Objective value of mapping, when minimum-cost search is enabled and an improving
+        /// mapping was found.
+        std::optional<double> objective_value;
 
         /// Total number of nodes processed (recursive calls).
         unsigned long long nodes = 0;

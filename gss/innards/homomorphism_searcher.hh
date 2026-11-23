@@ -73,6 +73,12 @@ namespace gss::innards
 
     using DuplicateSolutionFilterer = const std::function<auto(const HomomorphismAssignments &)->bool>;
 
+    struct HomomorphismObjectiveState
+    {
+        double score = 0.0;
+        std::vector<int> mapping;
+    };
+
     class HomomorphismSearcher
     {
     private:
@@ -94,6 +100,24 @@ namespace gss::innards
         // tested inside its loop.
         const bool _record_filter_activations, _verbose_proof_comments, _track_removals;
         FilterActivations _filter_activations;
+
+        std::optional<double> _best_objective_value;
+        VertexToVertexMapping _best_objective_mapping;
+        bool _have_best_objective_mapping = false;
+
+        auto objective_incremental_cost(
+            const HomomorphismAssignment &,
+            const HomomorphismObjectiveState &) const -> double;
+
+        auto apply_objective_assignment(
+            const HomomorphismAssignment &,
+            HomomorphismObjectiveState &) -> bool;
+
+        auto objective_sort(
+            std::vector<int> &,
+            unsigned,
+            unsigned,
+            const HomomorphismObjectiveState &) const -> void;
 
         auto assignments_as_proof_decisions(const HomomorphismAssignments & assignments) const -> std::vector<std::pair<int, int>>;
 
@@ -136,11 +160,18 @@ namespace gss::innards
 
         auto expand_to_full_result(const HomomorphismAssignments & assignments, VertexToVertexMapping & mapping) -> void;
 
-        auto propagate(bool initial, Domains & new_domains, HomomorphismAssignments & assignments) -> bool;
+        auto initial_objective_state() const -> HomomorphismObjectiveState;
+
+        auto propagate(
+            bool initial,
+            Domains & new_domains,
+            HomomorphismAssignments & assignments,
+            HomomorphismObjectiveState & objective_state) -> bool;
 
         auto restarting_search(
             HomomorphismAssignments & assignments,
             const Domains & domains,
+            const HomomorphismObjectiveState & objective_state,
             unsigned long long & nodes,
             unsigned long long & propagations,
             loooong & solution_count,
@@ -148,6 +179,8 @@ namespace gss::innards
             RestartsSchedule & restarts_schedule) -> SearchResult;
 
         auto save_result(const HomomorphismAssignments & assignments, HomomorphismResult & result) -> void;
+
+        auto save_best_objective_result(HomomorphismResult & result) const -> void;
 
         // Append this searcher's filter-activation counts, if it was recording any.
         auto add_extra_stats(std::list<std::string> & stats) const -> void;

@@ -290,3 +290,113 @@ R"(1,1
                      });
     }
 }
+
+TEST_CASE("minimum-cost homomorphism objective")
+{
+    SECTION("finds the lowest-cost structural mapping and bypasses the clique shortcut")
+    {
+        auto pattern = read_csv(stringstream{"a,b\n"}, "pattern");
+        auto target = read_csv(stringstream{"1,2\n3,4\n"}, "target");
+
+        auto t = [&](const string & s) { return unsigned(*target.vertex_from_name(s)); };
+
+        HomomorphismParams params;
+        params.timeout = make_shared<Timeout>(0s);
+        params.restarts_schedule = make_unique<NoRestartsSchedule>();
+
+        HomomorphismObjective objective;
+        objective.pair_cost = [&](unsigned p, unsigned q, unsigned x, unsigned y) {
+            if (p == q)
+                return 0.0;
+            const bool expensive_edge =
+                (x == t("1") && y == t("2")) || (x == t("2") && y == t("1"));
+            const bool cheap_edge =
+                (x == t("3") && y == t("4")) || (x == t("4") && y == t("3"));
+            if (expensive_edge)
+                return 10.0;
+            if (cheap_edge)
+                return 1.0;
+            return 1000.0;
+        };
+        params.objective = objective;
+
+        auto result = solve_homomorphism_problem(pattern, target, params);
+        REQUIRE(result.objective_value);
+        CHECK(*result.objective_value == 1.0);
+        CHECK(result.mapping.size() == 2);
+        CHECK(result.complete);
+
+        set<int> mapped_targets;
+        for (auto & [_, target_vertex] : result.mapping)
+            mapped_targets.insert(target_vertex);
+        CHECK(mapped_targets == set<int>{int(t("3")), int(t("4"))});
+
+        for (auto & stat : result.extra_stats)
+            CHECK(stat != "used_clique_solver = true");
+    }
+
+    SECTION("uses the initial upper bound strictly and scores propagation-forced assignments")
+    {
+        auto pattern = read_csv(stringstream{"a,b\n"}, "pattern");
+        auto target = read_csv(stringstream{"1,2\n3,4\n"}, "target");
+
+        auto t = [&](const string & s) { return unsigned(*target.vertex_from_name(s)); };
+
+        HomomorphismParams params;
+        params.timeout = make_shared<Timeout>(0s);
+        params.restarts_schedule = make_unique<NoRestartsSchedule>();
+
+        HomomorphismObjective objective;
+        objective.pair_cost = [&](unsigned p, unsigned q, unsigned x, unsigned y) {
+            if (p == q)
+                return 0.0;
+            const bool expensive_edge =
+                (x == t("1") && y == t("2")) || (x == t("2") && y == t("1"));
+            const bool cheap_edge =
+                (x == t("3") && y == t("4")) || (x == t("4") && y == t("3"));
+            if (expensive_edge)
+                return 10.0;
+            if (cheap_edge)
+                return 1.0;
+            return 1000.0;
+        };
+        objective.initial_upper_bound = 1.0;
+        params.objective = objective;
+
+        auto result = solve_homomorphism_problem(pattern, target, params);
+        CHECK(result.mapping.empty());
+        CHECK_FALSE(result.objective_value);
+        CHECK(result.complete);
+    }
+
+    SECTION("includes vertex costs")
+    {
+        auto pattern = read_csv(stringstream{"a,\nb,\n"}, "pattern");
+        auto target = read_csv(stringstream{"1,\n2,\n3,\n"}, "target");
+
+        auto p = [&](const string & s) { return unsigned(*pattern.vertex_from_name(s)); };
+        auto t = [&](const string & s) { return unsigned(*target.vertex_from_name(s)); };
+
+        HomomorphismParams params;
+        params.timeout = make_shared<Timeout>(0s);
+        params.restarts_schedule = make_unique<NoRestartsSchedule>();
+
+        HomomorphismObjective objective;
+        objective.vertex_cost = [&](unsigned pv, unsigned tv) {
+            if (pv == p("a"))
+                return tv == t("1") ? 0.25 : 5.0;
+            if (pv == p("b"))
+                return tv == t("2") ? 0.5 : 5.0;
+            return 0.0;
+        };
+        objective.order_values_by_cost = true;
+        params.objective = objective;
+
+        auto result = solve_homomorphism_problem(pattern, target, params);
+        REQUIRE(result.objective_value);
+        CHECK(*result.objective_value == 0.75);
+        CHECK(result.mapping.at(p("a")) == t("1"));
+        CHECK(result.mapping.at(p("b")) == t("2"));
+        CHECK(result.complete);
+    }
+}

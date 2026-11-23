@@ -3,6 +3,7 @@
 #include <gss/innards/homomorphism_searcher.hh>
 
 #include <optional>
+#include <stdexcept>
 
 using namespace gss;
 using namespace gss::innards;
@@ -31,12 +32,89 @@ HomomorphismSearcher::HomomorphismSearcher(const HomomorphismModel & m, const Ho
     _verbose_proof_comments(f && f->super_extra_verbose()),
     _track_removals(p.record_filter_activations || (f && f->super_extra_verbose())),
     _filter_activations(m.max_graphs),
+    _best_objective_value(p.objective ? p.objective->initial_upper_bound : std::nullopt),
     watches(w)
 {
     if (might_have_watches(params)) {
         watches.table.target_size = model.target_size;
         watches.table.data.resize(model.pattern_size * model.target_size);
     }
+}
+
+auto HomomorphismSearcher::initial_objective_state() const -> HomomorphismObjectiveState
+{
+    HomomorphismObjectiveState result;
+    if (params.objective)
+        result.mapping.assign(model.pattern_size, -1);
+    return result;
+}
+
+auto HomomorphismSearcher::objective_incremental_cost(
+    const HomomorphismAssignment & assignment,
+    const HomomorphismObjectiveState & state) const -> double
+{
+    if (! params.objective)
+        return 0.0;
+
+    const auto & objective = *params.objective;
+    double result = objective.vertex_cost
+        ? objective.vertex_cost(assignment.pattern_vertex, assignment.target_vertex)
+        : 0.0;
+
+    if (objective.pair_cost) {
+        result += objective.pair_cost(
+            assignment.pattern_vertex, assignment.pattern_vertex, assignment.target_vertex,
+            assignment.target_vertex);
+        for (unsigned other_pattern = 0; other_pattern < state.mapping.size(); ++other_pattern) {
+            int other_target = state.mapping[other_pattern];
+            if (other_target >= 0)
+                result += objective.pair_cost(
+                    assignment.pattern_vertex, other_pattern, assignment.target_vertex,
+                    unsigned(other_target));
+        }
+    }
+
+    if (! (result >= 0.0))
+        throw std::invalid_argument{"Homomorphism objective costs must be non-negative and not NaN"};
+
+    return result;
+}
+
+auto HomomorphismSearcher::apply_objective_assignment(
+    const HomomorphismAssignment & assignment,
+    HomomorphismObjectiveState & state) -> bool
+{
+    if (! params.objective)
+        return true;
+
+    // A branch decision is placed on the assignment trail before propagate() fixes the
+    // corresponding unit domain. Only charge a pattern vertex the first time it becomes fixed.
+    if (state.mapping[assignment.pattern_vertex] >= 0)
+        return state.mapping[assignment.pattern_vertex] == int(assignment.target_vertex);
+
+    state.score += objective_incremental_cost(assignment, state);
+    state.mapping[assignment.pattern_vertex] = int(assignment.target_vertex);
+
+    // Costs are required to be non-negative, so the current partial score is a valid lower bound
+    // on every completion below this node. Match VF2's decreasing restriction: equality is not an
+    // improvement and can be pruned as well.
+    return ! _best_objective_value || state.score < *_best_objective_value;
+}
+
+auto HomomorphismSearcher::objective_sort(
+    vector<int> & branch_v,
+    unsigned branch_v_end,
+    unsigned pattern_vertex,
+    const HomomorphismObjectiveState & state) const -> void
+{
+    if (! params.objective || ! params.objective->order_values_by_cost)
+        return;
+
+    stable_sort(branch_v.begin(), branch_v.begin() + branch_v_end, [&](int a, int b) {
+        return objective_incremental_cost(
+                   {pattern_vertex, unsigned(a)}, state)
+            < objective_incremental_cost({pattern_vertex, unsigned(b)}, state);
+    });
 }
 
 auto HomomorphismSearcher::assignments_as_proof_decisions(const HomomorphismAssignments & assignments) const -> vector<pair<int, int>>
@@ -75,6 +153,15 @@ auto HomomorphismSearcher::save_result(const HomomorphismAssignments & assignmen
     result.extra_stats.push_back(where);
 }
 
+auto HomomorphismSearcher::save_best_objective_result(HomomorphismResult & result) const -> void
+{
+    if (! params.objective || ! _have_best_objective_mapping)
+        return;
+
+    result.mapping = _best_objective_mapping;
+    result.objective_value = _best_objective_value;
+}
+
 auto HomomorphismSearcher::add_extra_stats(std::list<std::string> & stats) const -> void
 {
     if (_record_filter_activations)
@@ -84,6 +171,7 @@ auto HomomorphismSearcher::add_extra_stats(std::list<std::string> & stats) const
 auto HomomorphismSearcher::restarting_search(
     HomomorphismAssignments & assignments,
     const Domains & domains,
+    const HomomorphismObjectiveState & objective_state,
     unsigned long long & nodes,
     unsigned long long & propagations,
     loooong & solution_count,
@@ -113,6 +201,16 @@ auto HomomorphismSearcher::restarting_search(
     if (! branch_domain) {
         if (proof)
             proof->post_solution(solution_in_proof_form(assignments));
+
+        if (params.objective) {
+            if (! _best_objective_value || objective_state.score < *_best_objective_value) {
+                _best_objective_value = objective_state.score;
+                _best_objective_mapping.clear();
+                expand_to_full_result(assignments, _best_objective_mapping);
+                _have_best_objective_mapping = true;
+            }
+            return SearchResult::SatisfiableButKeepGoing;
+        }
 
         if (params.count_solutions) {
             // we could be finding duplicate solutions, in threaded search
@@ -164,6 +262,10 @@ auto HomomorphismSearcher::restarting_search(
         break;
     }
 
+    // Cost ordering is optional and stable, so the selected Glasgow heuristic remains the
+    // tie-breaker for equal immediate objective costs.
+    objective_sort(branch_v, branch_v_end, branch_domain->v, objective_state);
+
     int discrepancy_count = 0;
     bool actually_hit_a_failure = false;
 
@@ -184,12 +286,13 @@ auto HomomorphismSearcher::restarting_search(
         // make the assignment
         assignments.values.push_back({{branch_domain->v, unsigned(*f_v)}, true, discrepancy_count, int(branch_v_end)});
 
-        // set up new domains
+        // set up new domains and a branch-local objective state
         Domains new_domains = copy_nonfixed_domains_and_make_assignment(domains, branch_domain->v, *f_v);
+        auto new_objective_state = objective_state;
 
         // propagate
         ++propagations;
-        if (! propagate(false, new_domains, assignments)) {
+        if (! propagate(false, new_domains, assignments, new_objective_state)) {
             // failure? restore assignments and go on to the next thing
             if (proof)
                 model.proofs()->propagation_failure(assignments_as_proof_decisions(assignments), int(branch_domain->v), int(*f_v));
@@ -204,7 +307,7 @@ auto HomomorphismSearcher::restarting_search(
             proof->start_level(depth + 2);
 
         // recursive search
-        auto search_result = restarting_search(assignments, new_domains, nodes, propagations,
+        auto search_result = restarting_search(assignments, new_domains, new_objective_state, nodes, propagations,
             solution_count, depth + 1, restarts_schedule);
 
         switch (search_result) {
@@ -757,7 +860,11 @@ auto HomomorphismSearcher::propagate_occur_less_thans(
     return true;
 }
 
-auto HomomorphismSearcher::propagate(bool initial, Domains & new_domains, HomomorphismAssignments & assignments) -> bool
+auto HomomorphismSearcher::propagate(
+    bool initial,
+    Domains & new_domains,
+    HomomorphismAssignments & assignments,
+    HomomorphismObjectiveState & objective_state) -> bool
 {
     // nogoods might be watching things in initial assignments. this is possibly not the
     // best place to put this...
@@ -805,6 +912,8 @@ auto HomomorphismSearcher::propagate(bool initial, Domains & new_domains, Homomo
 
             // ok, make the assignment
             branch_domain->fixed = true;
+            if (! apply_objective_assignment(*current_assignment, objective_state))
+                return false;
             assignments.values.push_back({*current_assignment, false, -1, -1});
 
             if (proof) {
